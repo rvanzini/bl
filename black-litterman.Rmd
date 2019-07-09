@@ -1,0 +1,448 @@
+---
+title: "Black-Litterman's model and MICERs"
+author: "Rodolfo Vanzini"
+date: "6/24/2019"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2  # upto two depths of headings (specified by #, ## and ###)
+    number_sections: true  ## if you want number sections at each table header
+    theme: default
+  pdf_document: default
+  self_contained: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, warning = FALSE, message = FALSE, fig.width = 6.0, fig.asp = 0.75, out.width = "67%", fig.align = "center", fig.show = 'hold', comment = "#>", dev = c("png"))
+```
+
+#  Il modello di Black-Litterman
+
+La formula di Black-Litterman (BL) serve per ottenere i rendimenti attesi delle asset class da inserire in portafoglio tenendo simultaneamente conto delle *views* "a priori" dell'investitore e dei rendimenti impliciti attesi già scontati dalle condizioni correnti di mercato. La nota formula di Black-Litterman, riportata di seguito, esprime la distribuzione dei rendimenti delle attivitià finanziarie in portafoglio in base ad una $N\left(\mu, M^{-1} \right)$.
+
+$$\mu = \bigg[ \big( \tau V \big)^{-1} + P^\top \Omega^{-1} P\bigg]^{-1} \bigg[ \big( \tau V  \big)^{-1} \Pi + P^\top \Omega^{-1} Q\bigg]$$
+
+Mentre le varianze-covarianze $M^{-1}$, applicando il modello BL sono date da:
+
+$$M^{-1} = \bigg[ \big( \tau V \big)^{-1} + P^\top \Omega^{-1} P\bigg]^{-1}$$
+
+dove con:
+
+* $r_{BL}$ si intendono i rendimenti attesi calcolati applicando la formula di BL;
+* $\tau$ è uno scalare, il cui valore è impostato in base alla calibratura del modello (di seguito);
+* $V$ è la matrice varianza-covarianza $n \times n$ ($n$ sono le asset class selezionate) dei rendimenti periodali;
+* $P$ è una matrice $k \times n$ dove $k$ rappresenta il numero di *views* dell'investitore;
+* $\Omega$ è la matrice $n \times n$ che contiene le varianze (e anche le covarianze) relative alle *views* dell'investitore;
+* $\Pi$ è il vettore colonna $n \times 1$ dei rendimenti attei impliciti già scontati nelle condizioni correnti di mercato;
+* $Q$ è il vettore colonna $k \times 1$ contenente le *views* dell'investitore.
+
+Fondamentalmente, la formula di BL rappresenta una media ponderata complessa $\hat{w}_{\left(\tau, V, \Omega\right)}$ dei rendimenti attesi impliciti già scontati dalle condizioni correnti di mercato, $\Pi$, e dei rendimenti attesi contenuti nelle *views* dell'investitore, $Q$.
+
+$$r_{BL} = \hat{w}_{\left(\tau, V, \Omega\right)} \Pi + \left(1 - \hat{w}_{\left(\tau, V, \Omega\right)}\right) Q$$ 
+
+Si può pensare ai pesi $\hat{w}_{\left(\tau, V, \Omega\right)}$ come una funzione che dipende dalla verosimiglianza implicita nelle condizioni correnti di mercato data dalle varianze e covarianze contenute nella matrice $V$ e dalla fiducia a priori, con cui l'investitore esprime le proprie attese nelle *views*, contenuta nella matrice $\Omega$.
+
+Ipotizzando che gli investitori massimizzino l'utilità della ricchezza in base alla seguente funzione di utilità. 
+
+$$U = w^\top \mu - \frac{\lambda}{2}w^\top V w$$
+
+Possiamo ricavare i rendimenti impliciti imponendo che la derivata prima della funzione rispetto ai pesi $w$ (le allocazioni di portafoglio date dal mercato) sia pari a zero (nel suo punto di massimo) ottenendo quindi:
+
+$$\Pi = \lambda V w$$
+
+# Un'applicazione con gli indici di mercato
+
+Importiamo i dati.
+```{r import}
+library(tidyverse)
+(ret <-  read_csv("data/ETFs.csv"))
+```
+
+Calcoliamo la matrice varianza-covarianza.
+
+```{r var-covar}
+(V <- cov(ret))
+```
+
+Impostiamo il coefficiente di avversione al rischio.
+```{r lambda}
+l <- 3.07
+```
+
+Settiamo i pesi delle asset class derivanti dalle capitalizzazioni di mercato.
+```{r weights}
+w <- c(0.10, 0.22, 0.10, 0.12, 0.25, 0.21)
+```
+
+
+
+Ricaviamo il vettore dei rendimenti impliciti  (in percentuale) nelle condizioni correnti di mercato --- dati i parametri impostati e le covarianze storiche.
+
+```{r pi}
+(Pi <- l * V %*% w) *100
+```
+
+Le *views*:
+
+1. Ci attendiamo che l'SPY abbia un rendimento dell'1,0% (view assoluta);
+1. Ci aspettiamo che IEF sovraperformi XLF dello 0,25% (view relativa);
+1. Ci aspettiamo che IWM sovraperformi GLD dello 0,20% (view relativa complessa). Inseriamo le view nella matrice $Q$.
+```{r q-views}
+Q <- c(0.01, 0.0025, 0.0020)
+```
+
+Costruiamo la matrice di collegamento (o di servizio) $P$ per inserire le views nel modello.
+```{r p-link}
+P <- matrix(c(1, 0,  0, 0,   0,    0, 
+              0, 1, -1, 0,   0,    0, 
+              0, 0,  0, 1,   0,   -1),
+            nrow = 3, 
+            ncol = 6, 
+            byrow = TRUE)
+P
+```
+
+Impostiamo lo scalare $\tau$ --- di fatto, il modo in cui viene implementato il modello rende i rendimenti attesi in base alle views indipendenti dal valore dello scalare $\tau$.
+```{r tau}
+tau <- 0.025
+```
+
+Calcoliamo la matrice omega contenente l'incertezza riguardante le views --- dipende dalle varianze-covarianze storiche. Normalmente, la matrice $\Omega$ viene calcolata come matrice diagonale --- anche se non è strettmanente necessario. Il calcolo di $\Omega$ è probabilmente il passaggio più dibattutto nell'implementazione del modello di BL.
+
+```{r o-view-conf}
+# (O <- P %*% V %*% t(P) * tau) # matrice NON diagonale, si tiene conto delle covarianze tra views
+(O <- diag(diag(P %*% V %*% t(P) * tau))) # matrice diagonale, NON si tiene conto delle covarianze tra views ipotizzando la loro indipendenza
+```
+
+Calcoliamo i rendimenti Black-Litterman usando la formula con i dati importati.
+
+```{r bl-formula}
+black_litterman <- function(tau, V, P, O, Pi, Q) {
+  solve(solve(tau * V) + t(P) %*% solve(O) %*% P) %*% 
+    (solve(tau * V) %*% Pi + t(P) %*% solve(O) %*% Q)
+}
+(r_bl <- black_litterman(tau, V, P, O, Pi, Q))
+```
+
+Confrontiamo i rendimenti Black-Litterman ($R_{BL}$) con quelli impiciti ($\Pi$), esprimendoli in percentuale.
+```{r comp-pi-rbl}
+tibble(asset = names(V[1,]), 
+       r_bl = r_bl[ , 1] * 100, 
+       r_pi = Pi[ , 1] * 100, 
+       differenza = r_bl - r_pi)
+```
+
+Calcoliamo i pesi ottimali dati i rendimenti derivanti dai rendimenti impliciti e dalle *views*, impiegando la funzione utilizzata per ricavare i rendimenti impliciti $\Pi$, invertendo e sostituendo questi ultimi con i rendimenti $R_{BL}$.
+
+$$w = \left(\lambda V \right)^{-1} r_{BL}$$
+
+```{r opt-w}
+(w_opt <- solve(l * V) %*% r_bl)
+```
+
+Naturalmente, è possibile estendere il modello BL per poter tenere conto anche di pesi non negativi, somma dei pesi pari a 1, ecc. He and Litterman suggeriscono di inserire i rendimenti calcolati con la formula di Black-Litterman in un processo di ottimizzazione media-varianza.
+
+# Un'applicazione con i titoli azionari dell'S&P 500
+
+```{r import-sp500, eval= FALSE, echo = FALSE, cache = TRUE}
+members <- read_csv2("data/sp500.csv")
+members <- members %>% mutate(Symbol = if_else(Symbol == "BRK.B", "BRKB", Symbol))
+members <- members %>% mutate(Symbol = if_else(Symbol == "BF.B", "BFB", Symbol))
+
+library(quantmod)
+library(zoo)
+ret_sp500 <- lapply(1:length(members$Symbol), function(i){
+  as.xts(dailyReturn(na.omit(getSymbols(members$Symbol[[i]], 
+                                        src = "yahoo",
+                                        auto.assign = FALSE)),
+                     subset='2019::'))
+})
+```
+
+```{r import-sp500-tidyquant, echo = FALSE, eval = FALSE}
+#import data using tidyquant
+library(tidyquant)
+tickers <- tq_index("SP500")
+ret_sp500 <- c(tickers$symbol) %>%
+    tq_get(get  = "stock.prices",
+           from = "2019-01-01",
+           to   = "2019-06-30") %>%
+    group_by(symbol) %>%
+    tq_transmute(select     = adjusted, 
+                 mutate_fun = periodReturn, 
+                 period     = "daily", 
+                 col_rename = "Ra")
+ret_sp500
+```
+
+
+
+```{r tidy-t, echo = FALSE, eval = FALSE}
+#tidy data and write file
+ret_sp500 <- ret_sp500 %>% ungroup() %>% 
+  spread(key = symbol, value = Ra) %>% 
+  filter(date > "2019-01-02")
+
+write_csv(ret_sp500, "data/sp500.csv")
+```
+
+Let's load the data from `data/sp500.csv` file and clean them.
+```{r laod-data}
+ret_sp500 <- read_csv("data/sp500.csv")
+ret_sp500 <- ret_sp500  %>% 
+  gather(security, return, 2:504, na.rm = TRUE) %>%
+  spread(key = security, value = return)
+```
+
+Compute variance-covariance matrix.
+```{r mcov}
+V_sp500 <- ret_sp500 %>% select(-date) %>% cov(use ="complete.obs")
+```
+
+Let's check if `V_sp500` is invertible by computing the determinate.
+```{r det_V_sp500}
+det(V_sp500)
+```
+
+Since the determinate is 0 we cannot implement the Black-Litterman model because we cannot invert the variance-covariance matrix. Let's try reducing iteratively the number of securities to find the least number of them to implement the model.
+
+```{r tickers}
+library(tidyquant)
+(tickers <- tq_index("SP500"))
+```
+
+I simply write a function to compute the variance-covariance determinate and then test it.
+```{r sample_sp100}
+n_smpl <- function(ret_sp500, tickers, n) {
+  n <- n
+  ccc <- colnames(ret_sp500)
+  sm <- intersect(ccc, tickers$symbol[1:n])
+  ret_sp_sm <- ret_sp500 %>% select(sm)
+  V_sp_sm <- ret_sp_sm %>% cov(use ="complete.obs")
+  det(V_sp_sm)
+}
+
+n_smpl(ret_sp500 = ret_sp500, tickers = tickers, n = 400)
+```
+
+Then I initialize the variables and apply the function until the sample size returns a non-zero determinate.
+```{r sample-size}
+det <- 0
+n <- 500
+while(det == 0){
+  n <- n - 1
+  det <- n_smpl(ret_sp500 = ret_sp500, tickers = tickers, n = n)
+}
+n; det
+```
+
+The least number of securities to implement the Black-Litterman model is thus `r n`. Using the same $\lambda$ as before we can now compute the implied returns.
+
+```{r vcov-weight}
+n <- 77
+ccc <- colnames(ret_sp500)
+sm <- intersect(ccc, tickers$symbol[1:n])
+ret_sp_sm <- ret_sp500 %>% select(sm)
+V_sp_sm <- ret_sp_sm %>% cov(use ="complete.obs")
+w_sp_sm <- pull(
+  tickers %>% filter(symbol %in% sm) %>% select(weight)
+)
+```
+
+The daily implied returns in alphabetical order, in percent and yearly terms.
+```{r PI-sp-sm}
+Pi_sp_sm <- l * V_sp_sm %*% (w_sp_sm/sum(w_sp_sm)) * 252 * 100
+(Pi_sm <- tibble(symbol = row.names(Pi_sp_sm), 
+                 Pi = as.vector(Pi_sp_sm)
+                 )
+  )
+```
+
+$\Pi$ reordered by descending weight (in percent).
+```{r PI-sp-sm-wgt}
+bl_sm <-  arrange(left_join(Pi_sm, 
+                  tickers %>% select(-shares_held)
+                  ), 
+        desc(weight*100))
+
+
+(bl_sm_dt <- left_join(bl_sm, 
+          tibble(symbol = row.names(V_sp_sm), 
+                 sd = sqrt(diag(V_sp_sm)) * sqrt(252) * 100
+                 )
+          ) %>% 
+    mutate(weight = weight * 100) %>% 
+    select(symbol, company, Pi, sd, weight, sector)
+)
+```
+
+Plot MICERs (market implied consensus expecter returns).
+
+```{r MICERs, fig.width=6.0, fig.asp=1.0}
+bl_sm_dt %>% ggplot(aes(sd, Pi, size = weight, color = sector)) + 
+  geom_point() + 
+  theme(legend.position = "bottom", 
+        legend.box = "vertical", 
+        legend.title=element_text(size=9), 
+        legend.text=element_text(size=8)) + 
+  scale_colour_brewer(palette = "Paired") +
+  ggrepel::geom_label_repel(data = filter(bl_sm_dt, weight >= 1.0), aes(label = symbol), show.legend = FALSE) + 
+  labs(x = "standard deviation (daily, yearly terms)", 
+       y = "MICERs (reverse opt. market implied returns)", 
+       title = "MICERs: Apple, Amazon and Microsoft stand out", 
+       subtitle = "Implied returns from Black-Litterman's model application as of July 4th, 2019", 
+       caption = "Market Implied Consensus Expected Returns (MICERs). Analysis by Rodolfo Vanzini\nData source: Yahoo finance")
+```
+
+## Views
+
+Reorder variance-covariance matrix:
+```{r reorder-V}
+V_sp_sm <- V_sp_sm[bl_sm_dt$symbol, bl_sm_dt$symbol]
+```
+
+Let's introduce our views about six S&P 500 securities:
+
+* MSFT has an expected return of 8.40 percent (in yearly terms);
+* AAPL is expected to overperform AMZN by 2.00 percent;
+* FB is expected to underperform JNJ by 3.00 percent.
+
+Let's generate our $Q$ vector containing the views.
+
+```{r sp-500-views}
+Q_sp_500 <- c(8.4, 2.0, 3.0)
+```
+
+Let's create now the $P$ link matrix.
+
+```{r sp-link}
+P_sp_500 <-  matrix(c(1,  0, rep(0, 74), 
+               0,  0, 1, -1, rep(0, 72), 
+               0,  0, 0,  0, -1, 1, rep(0, 70)), 
+              nrow = 3, 
+             ncol = 76, byrow = TRUE)
+```
+
+Let's generate $\Omega$ matrix.
+
+```{r omegas-sp-500}
+(O_sp_500 <- diag(diag(P_sp_500 %*% V_sp_sm %*% t(P_sp_500) * tau)))
+```
+
+
+We can now apply BL's equation to generate BL's model returns.
+
+```{r BL-sp-500}
+r_bl_sp_sm <- black_litterman(tau = tau, 
+                V = V_sp_sm, 
+                P = P_sp_500, 
+                O = O_sp_500, 
+                Pi = bl_sm$Pi, 
+                Q = Q_sp_500)
+bl_sm_dt$r_bl <- r_bl_sp_sm[ , 1]
+```
+
+Let's check the first 10 rows.
+
+```{r r-bl}
+bl_sm_dt %>% select(symbol, Pi, r_bl)
+```
+
+Let's look for optimal weights by writing, and testing, a utility function to be maximised, given the parameters.
+
+```{r utility}
+utility <- function(weights, returns, var_covar, lambda){
+  w <- weights
+  mu <- returns
+  V <- var_covar
+  l <- lambda
+  utility <- t(w) %*% mu - (l/2 * t(w)) %*% V %*% w
+  return(utility)
+}
+
+utility(bl_sm_dt$weight, bl_sm_dt$r_bl, V_sp_sm, l)
+```
+
+
+Let's write, and test, a service function to use with the optimizer. `optim` will try and minimize a function therefore I'll use the utility function's reciprocal.
+```{r service-fnctn-for-optim}
+f_utility <- function(x){
+  1/utility(weights = x, 
+          returns = bl_sm_dt$r_bl, 
+          var_covar = V_sp_sm, 
+          lambda = l)
+}
+
+f_utility(bl_sm_dt$weight)
+```
+
+Now, I'll optimize portfolio weights to maximize utility by using `optim` ---actually, `optim` will try and minimze the reciprocal of the investor's utility function, thus maximizing it--- and will assign its output to a variable called `max_u`.
+
+```{r opt-w-bl}
+max_u <- optim(par = bl_sm_dt$weight, 
+               fn = f_utility)
+```
+
+
+```{r dt-optim}
+(bl_temp <- bl_sm_dt %>% mutate(weight_bl = max_u$par)  %>% 
+  select(symbol, sd, Pi, weight, r_bl, weight_bl, everything()) %>% 
+  rename(implied_ret = Pi, bl_ret = r_bl, mkt_weight = weight, bl_weight = weight_bl) %>%
+  mutate(diff_ret = bl_ret - implied_ret) %>% 
+  mutate(diff_weight = bl_weight - mkt_weight) %>% 
+  select(company, everything())
+)
+```
+
+```{r comparison}
+implied <- bl_temp %>% 
+  select(company, symbol, sd, implied_ret, mkt_weight, sector) %>% 
+  mutate(model = "implied") %>% 
+  rename(return = implied_ret, weight = mkt_weight)
+
+bl <- bl_temp %>% 
+  select(company, symbol, sd, bl_ret, bl_weight, sector) %>% 
+  mutate(model = "bl") %>% 
+  rename(return = bl_ret, weight = bl_weight)
+
+sp500 <- bind_rows(implied, bl)
+
+sp500 %>% ggplot(aes(sd, return, size = weight, color = sector)) + 
+  geom_point(alpha = 1) +  theme(legend.position = "bottom", 
+        legend.box = "vertical", 
+        legend.title=element_text(size=9), 
+        legend.text=element_text(size=8)) + 
+  scale_colour_brewer(palette = "Paired") +
+  facet_wrap( ~ model) +
+  ggrepel::geom_label_repel(data = filter(sp500, weight >= 1.25), aes(label = symbol), show.legend = FALSE) 
+```
+
+If we wanted to factor in our views expressing our confidence with more or less emphasis we could change the way we calculate $\Omega$ in the following fashion, first by conveying our degree of confidence as follows:
+
+* we are 50% confident about our MSFT view;
+* we are 90% confident about our AAPL-AMZN view;
+* we are only 5% confident about our FB-JNJ view.
+
+We can the enter these degrees of condifence in a $C$ vector and change the way we calculate $\Omega$.
+
+```{r omega-conf}
+C <- diag(1/c(0.50, 0.90, 0.05) - 1)
+(O_sp_500 <-  C %*% diag(diag(P_sp_500 %*% V_sp_sm %*% t(P_sp_500) * tau)))
+```
+
+```{r}
+r_bl_sp_sm_conf <- black_litterman(tau = tau, 
+                V = V_sp_sm, 
+                P = P_sp_500, 
+                O = O_sp_500, 
+                Pi = bl_sm$Pi, 
+                Q = Q_sp_500)
+cbind(Pi_sp_sm, 
+      r_bl_sp_sm, 
+      r_bl_sp_sm_conf)[c("AAPL", "AMZN", "MSFT", "FB", "JNJ"), ]
+```
+
+
+
+
+
